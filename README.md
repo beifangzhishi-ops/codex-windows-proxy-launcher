@@ -2,6 +2,8 @@
 
 这是一个独立的 Windows 工具项目，用于启动 Microsoft Store 版 Codex Desktop 并检查代理连接。脚本自动读取 Windows 当前用户的系统代理；未检测到显式代理时，回退到 `127.0.0.1:7890`。
 
+这个仓库是**无共享 App Server 版**。`Start-Codex-Proxy.cmd` 会只在本次启动进程树中清除 `CODEX_APP_SERVER_WS_URL`，确保 Desktop 使用自己的内置 app-server；不会修改用户级环境变量，也不会启动或停止 AOI shared stack。需要共享 App Server 时，请使用 `codex2larkAOI` 仓库里的 `Start-Codex-Shared-Proxy.cmd`。
+
 ## 文件
 
 - `Start-Codex-Proxy.cmd`：双击入口。
