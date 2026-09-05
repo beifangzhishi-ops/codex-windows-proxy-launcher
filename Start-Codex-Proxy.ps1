@@ -1,10 +1,13 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [switch]$CheckOnly,
     [ValidateRange(1, 120)]
     [int]$WaitSeconds = 12,
     [string]$FallbackProxy = '127.0.0.1:7890',
-    [string]$PackageName = 'OpenAI.Codex'
+    [string]$PackageName = 'OpenAI.Codex',
+    [string]$SharedAppUrl = 'ws://127.0.0.1:45789',
+    [string]$AoiRepoPath = '',
+    [switch]$SkipSharedApp
 )
 
 Set-StrictMode -Version Latest
@@ -222,6 +225,146 @@ function Test-IsExpectedProxyConnection {
     return (($expectedHost -in $loopbackNames) -and ($actualHost -in $loopbackNames))
 }
 
+function ConvertTo-ReadyUrl {
+    param([string]$WsUrl)
+
+    $uri = [Uri]$WsUrl
+    if ($uri.Scheme -ne 'ws' -and $uri.Scheme -ne 'wss') {
+        throw ('共享 app-server URL 必须是 ws:// 或 wss://：' + $WsUrl)
+    }
+
+    $scheme = if ($uri.Scheme -eq 'wss') { 'https' } else { 'http' }
+    $builder = New-Object System.UriBuilder($scheme, $uri.Host, $uri.Port, '/readyz')
+    return $builder.Uri.AbsoluteUri
+}
+
+function Test-HttpReady {
+    param([string]$Url)
+
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2 -ErrorAction Stop
+        return ($response.StatusCode -eq 200)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Wait-HttpReady {
+    param(
+        [string]$Url,
+        [int]$Seconds = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-HttpReady -Url $Url) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 400
+    }
+    return $false
+}
+
+function Resolve-AoiRepoPath {
+    param([string]$ConfiguredPath)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(
+        $ConfiguredPath,
+        $env:AOI_REPO_PATH,
+        [Environment]::GetEnvironmentVariable('AOI_REPO_PATH', 'User')
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
+            $candidates.Add([string]$candidate)
+        }
+    }
+
+    $parent = Split-Path -Parent $PSScriptRoot
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        $candidates.Add((Join-Path $parent 'codex2larkAOI'))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        foreach ($relative in @(
+            'codex2larkAOI',
+            'Documents\codex2larkAOI',
+            'Documents\GitHub\codex2larkAOI',
+            'GitHub\codex2larkAOI',
+            'source\repos\codex2larkAOI',
+            'Desktop\codex2larkAOI'
+        )) {
+            $candidates.Add((Join-Path $env:USERPROFILE $relative))
+        }
+    }
+
+    foreach ($candidate in @($candidates | Select-Object -Unique)) {
+        $stackScript = Join-Path $candidate 'scripts\shared-stack.ps1'
+        if (Test-Path -LiteralPath $stackScript) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    return $null
+}
+
+function Ensure-SharedApp {
+    param(
+        [string]$WsUrl,
+        [string]$ConfiguredRepoPath
+    )
+
+    $readyUrl = ConvertTo-ReadyUrl -WsUrl $WsUrl
+    if (Test-HttpReady -Url $readyUrl) {
+        $env:CODEX_APP_SERVER_WS_URL = $WsUrl
+        [Environment]::SetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', $WsUrl, 'User')
+        Write-Host ('共享 app-server 已就绪：' + $WsUrl) -ForegroundColor Green
+        return @{
+            ReadyUrl = $readyUrl
+            RepoPath = Resolve-AoiRepoPath -ConfiguredPath $ConfiguredRepoPath
+            Started = $false
+        }
+    }
+
+    $repoPath = Resolve-AoiRepoPath -ConfiguredPath $ConfiguredRepoPath
+    if ([string]::IsNullOrWhiteSpace($repoPath)) {
+        throw ('共享 app-server 未运行，且找不到 AOI 仓库。请先设置用户环境变量 AOI_REPO_PATH 指向 codex2larkAOI 本地目录。目标：' + $WsUrl)
+    }
+
+    $stackScript = Join-Path $repoPath 'scripts\shared-stack.ps1'
+    $runner = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $runner)) {
+        $runner = (Get-Command powershell.exe -ErrorAction Stop).Source
+    }
+
+    Write-Section '启动 AOI shared app-server'
+    Write-Host ('AOI 仓库：' + $repoPath)
+    Write-Host ('目标：' + $WsUrl)
+
+    $env:AOI_REPO_PATH = $repoPath
+    [Environment]::SetEnvironmentVariable('AOI_REPO_PATH', $repoPath, 'User')
+
+    & $runner -NoProfile -ExecutionPolicy Bypass -File $stackScript -Action start -NoGui
+    $stackExitCode = $LASTEXITCODE
+    if ($stackExitCode -ne 0) {
+        throw ('AOI shared stack 启动失败，退出代码：' + $stackExitCode)
+    }
+
+    if (-not (Wait-HttpReady -Url $readyUrl -Seconds 35)) {
+        throw ('AOI shared stack 未在预期时间内就绪：' + $readyUrl)
+    }
+
+    $env:CODEX_APP_SERVER_WS_URL = $WsUrl
+    [Environment]::SetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', $WsUrl, 'User')
+    Write-Host ('共享 app-server 已启动：' + $WsUrl) -ForegroundColor Green
+
+    return @{
+        ReadyUrl = $readyUrl
+        RepoPath = $repoPath
+        Started = $true
+    }
+}
+
 function Save-ConnectionReport {
     param(
         [string]$ReportPath,
@@ -229,7 +372,11 @@ function Save-ConnectionReport {
         [hashtable]$PackageInfo,
         [object[]]$Connections,
         [Uri]$ExpectedProxy,
-        [bool]$ProxyHit
+        [bool]$ProxyHit,
+        [string]$SharedAppUrl,
+        [string]$SharedAppStatus,
+        [string]$SharedAppUserEnv,
+        [bool]$SharedAppHit
     )
 
     $reportLines = @(
@@ -239,12 +386,16 @@ function Save-ConnectionReport {
         ('HTTP_PROXY：' + (Hide-ProxyCredential $Proxy.Http)),
         ('HTTPS_PROXY：' + (Hide-ProxyCredential $Proxy.Https)),
         ('ALL_PROXY：' + (Hide-ProxyCredential $Proxy.All)),
+        ('共享 App Server：' + $SharedAppUrl),
+        ('共享 App Server 状态：' + $SharedAppStatus),
+        ('CODEX_APP_SERVER_WS_URL(User)：' + $SharedAppUserEnv),
+        ('发现 Desktop/共享 App Server 连接：' + $(if ($SharedAppHit) { '是' } else { '否' })),
         ('包版本：' + [string]$PackageInfo.Package.Version),
         ('Executable：' + [string]$PackageInfo.Application.Executable),
         ('EntryPoint：' + [string]$PackageInfo.Application.EntryPoint),
         ('实际路径：' + $PackageInfo.ExecutablePath),
-        ('预期代理对端：' + $ExpectedProxy.Host + ':' + $ExpectedProxy.Port),
-        ('发现代理连接：' + $(if ($ProxyHit) { '是' } else { '否' })),
+        ('预期 Clash 代理对端：' + $ExpectedProxy.Host + ':' + $ExpectedProxy.Port),
+        ('发现 Clash 代理连接：' + $(if ($ProxyHit) { '是' } else { '否' })),
         '',
         '当前由 ChatGPT.exe 或 codex.exe 持有的已建立 TCP 连接：'
     )
@@ -274,9 +425,10 @@ function Save-ConnectionReport {
     $reportLines += @(
         '',
         '判定说明：',
-        '“发现代理连接：是”说明至少有一个 Codex 相关进程连接到了预期的 Clash 代理端口。',
-        '它能证明该连接经过代理，但仅凭 TCP 表无法给单条加密连接标注“Remote Control WebSocket”。',
-        '请在 Remote Control 已启用并保持连接时再次使用 -CheckOnly 检查。'
+        '共享 App Server 状态“就绪”表示 45789/readyz 可访问。',
+        '“发现 Desktop/共享 App Server 连接：是”表示至少有 Codex 相关进程连到共享 App Server 端口。',
+        '“发现 Clash 代理连接：是”表示至少有一个 Codex 相关进程连接到了预期的 Clash 代理端口。',
+        '仅凭 TCP 表无法给单条加密连接标注“Remote Control WebSocket”。'
     )
 
     Set-Content -LiteralPath $ReportPath -Value $reportLines -Encoding UTF8
@@ -321,6 +473,8 @@ try {
     Write-Host ('EntryPoint ：' + [string]$packageInfo.Application.EntryPoint)
     Write-Host ('实际路径   ：' + $packageInfo.ExecutablePath)
 
+    $sharedReadyUrl = if ($SkipSharedApp) { $null } else { ConvertTo-ReadyUrl -WsUrl $SharedAppUrl }
+
     if (-not $CheckOnly) {
         $runningChatGpt = @(Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue)
         if ($runningChatGpt.Count -gt 0) {
@@ -337,20 +491,33 @@ try {
         }
         Write-Host '代理端口可连接。' -ForegroundColor Green
 
-        Write-Section '设置本次启动的代理环境'
+        if (-not $SkipSharedApp) {
+            [void](Ensure-SharedApp -WsUrl $SharedAppUrl -ConfiguredRepoPath $AoiRepoPath)
+        }
+        else {
+            Write-Warning '已使用 -SkipSharedApp：本次启动不会强制连接 AOI shared app-server。'
+        }
+
+        Write-Section '设置本次启动环境'
         $env:HTTP_PROXY = $proxy.Http
         $env:HTTPS_PROXY = $proxy.Https
         $env:ALL_PROXY = $proxy.All
         $env:NO_PROXY = 'localhost,127.0.0.1,::1'
+        if (-not $SkipSharedApp) {
+            $env:CODEX_APP_SERVER_WS_URL = $SharedAppUrl
+        }
         Write-Host ('HTTP_PROXY =' + (Hide-ProxyCredential $env:HTTP_PROXY))
         Write-Host ('HTTPS_PROXY=' + (Hide-ProxyCredential $env:HTTPS_PROXY))
         Write-Host ('ALL_PROXY  =' + (Hide-ProxyCredential $env:ALL_PROXY))
         Write-Host ('NO_PROXY   =' + $env:NO_PROXY)
+        if (-not $SkipSharedApp) {
+            Write-Host ('CODEX_APP_SERVER_WS_URL=' + $env:CODEX_APP_SERVER_WS_URL)
+        }
 
         Write-Section '启动 Codex'
         $launchProcess = Start-Process -FilePath $packageInfo.ExecutablePath -PassThru
         Write-Host ('已提交启动，初始 PID：' + $launchProcess.Id) -ForegroundColor Green
-        Write-Host ('等待 ' + $WaitSeconds + ' 秒，让界面、app-server 和网络连接完成初始化……')
+        Write-Host ('等待 ' + $WaitSeconds + ' 秒，让界面、shared app-server 和网络连接完成初始化……')
         Start-Sleep -Seconds $WaitSeconds
     }
 
@@ -361,15 +528,44 @@ try {
     })
     $proxyHit = ($proxyConnections.Count -gt 0)
 
+    $sharedAppStatus = '跳过'
+    $sharedAppHit = $false
+    if (-not $SkipSharedApp) {
+        $sharedAppStatus = if (Test-HttpReady -Url $sharedReadyUrl) { '就绪' } else { '未就绪' }
+        $sharedUri = [Uri]$SharedAppUrl
+        $sharedConnections = @($connections | Where-Object {
+            Test-IsExpectedProxyConnection -RemoteAddress $_.RemoteAddress -RemotePort $_.RemotePort -ExpectedProxy $sharedUri
+        })
+        $sharedAppHit = ($sharedConnections.Count -gt 0)
+    }
+
+    $sharedAppUserEnv = [string][Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')
     $reportPath = Join-Path $PSScriptRoot 'Codex-代理连接报告.txt'
-    Save-ConnectionReport -ReportPath $reportPath -Proxy $proxy -PackageInfo $packageInfo -Connections $connections -ExpectedProxy $expectedProxy -ProxyHit $proxyHit
+    Save-ConnectionReport -ReportPath $reportPath -Proxy $proxy -PackageInfo $packageInfo -Connections $connections -ExpectedProxy $expectedProxy -ProxyHit $proxyHit -SharedAppUrl $SharedAppUrl -SharedAppStatus $sharedAppStatus -SharedAppUserEnv $sharedAppUserEnv -SharedAppHit $sharedAppHit
 
     if ($proxyHit) {
         Write-Host ('已确认：发现 ' + $proxyConnections.Count + ' 条 Codex 到 Clash 代理端口的连接。') -ForegroundColor Green
     }
     else {
-        Write-Warning '暂未发现 Codex 到预期代理端口的连接。若 Remote Control 尚未建立，请启用后使用 -CheckOnly 再检查。'
+        Write-Warning '暂未发现 Codex 到预期 Clash 代理端口的连接。若 Remote Control 尚未建立，请启用后使用 -CheckOnly 再检查。'
     }
+
+    if (-not $SkipSharedApp) {
+        if ($sharedAppStatus -eq '就绪') {
+            Write-Host ('共享 App Server：' + $SharedAppUrl + ' 已就绪。') -ForegroundColor Green
+        }
+        else {
+            Write-Warning ('共享 App Server 未就绪：' + $SharedAppUrl)
+        }
+
+        if ($sharedAppHit) {
+            Write-Host '已发现 Codex 进程连接到共享 App Server。' -ForegroundColor Green
+        }
+        elseif (-not $CheckOnly) {
+            Write-Warning '暂未在 TCP 表中看到 Codex -> shared app-server 连接；请在 Desktop 完成初始化后用 -CheckOnly 复查。'
+        }
+    }
+
     Write-Host ('报告：' + $reportPath)
     Write-Host ''
     Write-Host '复查命令：' -ForegroundColor Cyan
