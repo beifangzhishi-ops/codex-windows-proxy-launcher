@@ -1,12 +1,10 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$CheckOnly,
     [ValidateRange(1, 120)]
     [int]$WaitSeconds = 12,
     [string]$FallbackProxy = '127.0.0.1:7890',
-    [string]$PackageName = 'OpenAI.Codex',
-    [string]$SharedAppUrl = 'ws://127.0.0.1:45789',
-    [switch]$SkipSharedApp
+    [string]$PackageName = 'OpenAI.Codex'
 )
 
 Set-StrictMode -Version Latest
@@ -75,14 +73,9 @@ function Get-WindowsSystemProxy {
     $autoConfigUrl = [string](Get-OptionalPropertyValue -InputObject $settings -Name 'AutoConfigURL')
 
     if (-not $proxyEnabled -or [string]::IsNullOrWhiteSpace($proxyServer)) {
-        $source = '未检测到已启用的显式系统代理'
-        if (-not [string]::IsNullOrWhiteSpace($autoConfigUrl)) {
-            $source = '仅检测到 PAC，无法可靠转换为固定代理：' + $autoConfigUrl
-        }
-
         return @{
             Found = $false
-            Source = $source
+            Source = if ([string]::IsNullOrWhiteSpace($autoConfigUrl)) { '未检测到已启用的显式系统代理' } else { '仅检测到 PAC，无法可靠转换为固定代理：' + $autoConfigUrl }
             Http = $null
             Https = $null
             All = $null
@@ -208,18 +201,18 @@ function Get-CodexConnections {
         Sort-Object OwningProcess, RemoteAddress, RemotePort)
 }
 
-function Test-IsExpectedConnection {
+function Test-IsExpectedProxyConnection {
     param(
         [string]$RemoteAddress,
         [int]$RemotePort,
-        [Uri]$Expected
+        [Uri]$ExpectedProxy
     )
 
-    if ($RemotePort -ne $Expected.Port) {
+    if ($RemotePort -ne $ExpectedProxy.Port) {
         return $false
     }
 
-    $expectedHost = $Expected.Host.ToLowerInvariant()
+    $expectedHost = $ExpectedProxy.Host.ToLowerInvariant()
     $actualHost = $RemoteAddress.ToLowerInvariant()
     if ($expectedHost -eq $actualHost) {
         return $true
@@ -229,37 +222,6 @@ function Test-IsExpectedConnection {
     return (($expectedHost -in $loopbackNames) -and ($actualHost -in $loopbackNames))
 }
 
-function ConvertTo-ReadyUrl {
-    param([string]$WsUrl)
-
-    $uri = [Uri]$WsUrl
-    if ($uri.Scheme -ne 'ws' -and $uri.Scheme -ne 'wss') {
-        throw ('共享 app-server URL 必须是 ws:// 或 wss://：' + $WsUrl)
-    }
-
-    if ($uri.Scheme -eq 'wss') {
-        $scheme = 'https'
-    }
-    else {
-        $scheme = 'http'
-    }
-
-    $builder = New-Object -TypeName System.UriBuilder -ArgumentList @($scheme, $uri.Host, $uri.Port, '/readyz')
-    return $builder.Uri.AbsoluteUri
-}
-
-function Test-HttpReady {
-    param([string]$Url)
-
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2 -ErrorAction Stop
-        return ($response.StatusCode -eq 200)
-    }
-    catch {
-        return $false
-    }
-}
-
 function Save-ConnectionReport {
     param(
         [string]$ReportPath,
@@ -267,12 +229,7 @@ function Save-ConnectionReport {
         [hashtable]$PackageInfo,
         [object[]]$Connections,
         [Uri]$ExpectedProxy,
-        [bool]$ProxyHit,
-        [string]$SharedAppUrl,
-        [string]$SharedAppStatus,
-        [string]$LaunchMode,
-        [string]$SharedAppUserEnv,
-        [bool]$SharedAppHit
+        [bool]$ProxyHit
     )
 
     $reportLines = @(
@@ -282,17 +239,12 @@ function Save-ConnectionReport {
         ('HTTP_PROXY：' + (Hide-ProxyCredential $Proxy.Http)),
         ('HTTPS_PROXY：' + (Hide-ProxyCredential $Proxy.Https)),
         ('ALL_PROXY：' + (Hide-ProxyCredential $Proxy.All)),
-        ('共享 App Server：' + $SharedAppUrl),
-        ('共享 App Server 状态：' + $SharedAppStatus),
-        ('本次选择模式：' + $LaunchMode),
-        ('CODEX_APP_SERVER_WS_URL(User)：' + $SharedAppUserEnv),
-        ('发现 Codex/共享 App Server 连接：' + $(if ($SharedAppHit) { '是' } else { '否' })),
         ('包版本：' + [string]$PackageInfo.Package.Version),
         ('Executable：' + [string]$PackageInfo.Application.Executable),
         ('EntryPoint：' + [string]$PackageInfo.Application.EntryPoint),
         ('实际路径：' + $PackageInfo.ExecutablePath),
-        ('预期 Clash 代理对端：' + $ExpectedProxy.Host + ':' + $ExpectedProxy.Port),
-        ('发现 Clash 代理连接：' + $(if ($ProxyHit) { '是' } else { '否' })),
+        ('预期代理对端：' + $ExpectedProxy.Host + ':' + $ExpectedProxy.Port),
+        ('发现代理连接：' + $(if ($ProxyHit) { '是' } else { '否' })),
         '',
         '当前由 ChatGPT.exe 或 codex.exe 持有的已建立 TCP 连接：'
     )
@@ -322,12 +274,9 @@ function Save-ConnectionReport {
     $reportLines += @(
         '',
         '判定说明：',
-        '共享 App Server 状态“就绪”表示 45789/readyz 可访问。',
-        '启动器只探测共享状态，不负责启动 AOI shared stack。',
-        '共享就绪时，本次 Desktop 启动环境会注入 CODEX_APP_SERVER_WS_URL。',
-        '共享未就绪时，本次 Desktop 启动环境会移除 CODEX_APP_SERVER_WS_URL，让 Desktop 使用内置 app-server。',
-        '“发现 Clash 代理连接：是”表示至少有一个 Codex 相关进程连接到了预期的 Clash 代理端口。',
-        '仅凭 TCP 表无法给单条加密连接标注“Remote Control WebSocket”。'
+        '“发现代理连接：是”说明至少有一个 Codex 相关进程连接到了预期的 Clash 代理端口。',
+        '它能证明该连接经过代理，但仅凭 TCP 表无法给单条加密连接标注“Remote Control WebSocket”。',
+        '请在 Remote Control 已启用并保持连接时再次使用 -CheckOnly 检查。'
     )
 
     Set-Content -LiteralPath $ReportPath -Value $reportLines -Encoding UTF8
@@ -360,7 +309,6 @@ try {
     if ([string]::IsNullOrWhiteSpace($expectedProxyText)) {
         $expectedProxyText = [string]$proxy.All
     }
-
     $expectedProxy = [Uri]$expectedProxyText
     if ($expectedProxy.Port -le 0) {
         throw ('代理地址没有有效端口：' + $expectedProxyText)
@@ -372,40 +320,6 @@ try {
     Write-Host ('Executable：' + [string]$packageInfo.Application.Executable)
     Write-Host ('EntryPoint ：' + [string]$packageInfo.Application.EntryPoint)
     Write-Host ('实际路径   ：' + $packageInfo.ExecutablePath)
-
-    $sharedReadyUrl = ConvertTo-ReadyUrl -WsUrl $SharedAppUrl
-    $sharedReady = $false
-    if (-not $SkipSharedApp) {
-        $sharedReady = Test-HttpReady -Url $sharedReadyUrl
-    }
-
-    if ($SkipSharedApp) {
-        $launchMode = '内置 app-server（强制）'
-        $sharedAppStatus = '跳过'
-    }
-    elseif ($sharedReady) {
-        $launchMode = '共享 app-server'
-        $sharedAppStatus = '就绪'
-    }
-    else {
-        $launchMode = '内置 app-server'
-        $sharedAppStatus = '未就绪'
-    }
-
-    Write-Section '选择 App Server 模式'
-    if ($sharedReady -and -not $SkipSharedApp) {
-        Write-Host ('共享 App Server 已就绪：' + $SharedAppUrl) -ForegroundColor Green
-        Write-Host '本次 Desktop 将连接共享 App Server。' -ForegroundColor Green
-    }
-    else {
-        if ($SkipSharedApp) {
-            Write-Warning '已使用 -SkipSharedApp，本次强制使用 Desktop 内置 app-server。'
-        }
-        else {
-            Write-Host ('共享 App Server 未运行：' + $SharedAppUrl) -ForegroundColor Yellow
-            Write-Host '本次 Desktop 使用内置 app-server；启动器不会启动 AOI shared stack。' -ForegroundColor Yellow
-        }
-    }
 
     if (-not $CheckOnly) {
         $runningChatGpt = @(Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue)
@@ -423,70 +337,39 @@ try {
         }
         Write-Host '代理端口可连接。' -ForegroundColor Green
 
-        Write-Section '设置本次启动环境'
+        Write-Section '设置本次启动的代理环境'
         $env:HTTP_PROXY = $proxy.Http
         $env:HTTPS_PROXY = $proxy.Https
         $env:ALL_PROXY = $proxy.All
         $env:NO_PROXY = 'localhost,127.0.0.1,::1'
-
-        if ($sharedReady -and -not $SkipSharedApp) {
-            $env:CODEX_APP_SERVER_WS_URL = $SharedAppUrl
-        }
-        else {
-            Remove-Item Env:CODEX_APP_SERVER_WS_URL -ErrorAction SilentlyContinue
-        }
-
         Write-Host ('HTTP_PROXY =' + (Hide-ProxyCredential $env:HTTP_PROXY))
         Write-Host ('HTTPS_PROXY=' + (Hide-ProxyCredential $env:HTTPS_PROXY))
         Write-Host ('ALL_PROXY  =' + (Hide-ProxyCredential $env:ALL_PROXY))
         Write-Host ('NO_PROXY   =' + $env:NO_PROXY)
-        if ($sharedReady -and -not $SkipSharedApp) {
-            Write-Host ('CODEX_APP_SERVER_WS_URL=' + $env:CODEX_APP_SERVER_WS_URL)
-        }
-        else {
-            Write-Host 'CODEX_APP_SERVER_WS_URL=<未设置，本次使用内置 app-server>'
-        }
 
         Write-Section '启动 Codex'
         $launchProcess = Start-Process -FilePath $packageInfo.ExecutablePath -PassThru
         Write-Host ('已提交启动，初始 PID：' + $launchProcess.Id) -ForegroundColor Green
-        Write-Host ('等待 ' + $WaitSeconds + ' 秒，让界面和网络连接完成初始化……')
+        Write-Host ('等待 ' + $WaitSeconds + ' 秒，让界面、app-server 和网络连接完成初始化……')
         Start-Sleep -Seconds $WaitSeconds
     }
 
     Write-Section '检查 Codex 网络连接'
     $connections = @(Get-CodexConnections)
     $proxyConnections = @($connections | Where-Object {
-        Test-IsExpectedConnection -RemoteAddress $_.RemoteAddress -RemotePort $_.RemotePort -Expected $expectedProxy
+        Test-IsExpectedProxyConnection -RemoteAddress $_.RemoteAddress -RemotePort $_.RemotePort -ExpectedProxy $expectedProxy
     })
     $proxyHit = ($proxyConnections.Count -gt 0)
 
-    $sharedAppHit = $false
-    $sharedUri = [Uri]$SharedAppUrl
-    $sharedConnections = @($connections | Where-Object {
-        Test-IsExpectedConnection -RemoteAddress $_.RemoteAddress -RemotePort $_.RemotePort -Expected $sharedUri
-    })
-    $sharedAppHit = ($sharedConnections.Count -gt 0)
-
-    $sharedAppUserEnv = [string][Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')
     $reportPath = Join-Path $PSScriptRoot 'Codex-代理连接报告.txt'
-    Save-ConnectionReport -ReportPath $reportPath -Proxy $proxy -PackageInfo $packageInfo -Connections $connections -ExpectedProxy $expectedProxy -ProxyHit $proxyHit -SharedAppUrl $SharedAppUrl -SharedAppStatus $sharedAppStatus -LaunchMode $launchMode -SharedAppUserEnv $sharedAppUserEnv -SharedAppHit $sharedAppHit
+    Save-ConnectionReport -ReportPath $reportPath -Proxy $proxy -PackageInfo $packageInfo -Connections $connections -ExpectedProxy $expectedProxy -ProxyHit $proxyHit
 
     if ($proxyHit) {
         Write-Host ('已确认：发现 ' + $proxyConnections.Count + ' 条 Codex 到 Clash 代理端口的连接。') -ForegroundColor Green
     }
     else {
-        Write-Warning '暂未发现 Codex 到预期 Clash 代理端口的连接。若 Remote Control 尚未建立，请启用后使用 -CheckOnly 再检查。'
+        Write-Warning '暂未发现 Codex 到预期代理端口的连接。若 Remote Control 尚未建立，请启用后使用 -CheckOnly 再检查。'
     }
-
-    if ($sharedAppHit) {
-        Write-Host '已发现 Codex 进程连接到共享 App Server。' -ForegroundColor Green
-    }
-    elseif ($sharedReady -and -not $SkipSharedApp -and -not $CheckOnly) {
-        Write-Warning '共享 App Server 已就绪，但暂未在 TCP 表中看到 Desktop 连接；请在 Desktop 完成初始化后用 -CheckOnly 复查。'
-    }
-
-    Write-Host ('本次选择模式：' + $launchMode)
     Write-Host ('报告：' + $reportPath)
     Write-Host ''
     Write-Host '复查命令：' -ForegroundColor Cyan
