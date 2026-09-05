@@ -6,7 +6,6 @@ param(
     [string]$FallbackProxy = '127.0.0.1:7890',
     [string]$PackageName = 'OpenAI.Codex',
     [string]$SharedAppUrl = 'ws://127.0.0.1:45789',
-    [string]$AoiRepoPath = '',
     [switch]$SkipSharedApp
 )
 
@@ -30,12 +29,12 @@ function ConvertTo-ProxyUri {
         return $null
     }
 
-    $clean = $Value.Trim()
-    if ($clean -match '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
-        return $clean
+    $cleanValue = $Value.Trim()
+    if ($cleanValue -match '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
+        return $cleanValue
     }
 
-    return ($DefaultScheme + '://' + $clean)
+    return ($DefaultScheme + '://' + $cleanValue)
 }
 
 function Hide-ProxyCredential {
@@ -46,6 +45,7 @@ function Hide-ProxyCredential {
         if ([string]::IsNullOrWhiteSpace($uri.UserInfo)) {
             return $ProxyUri
         }
+
         return ('{0}://***@{1}:{2}' -f $uri.Scheme, $uri.Host, $uri.Port)
     }
     catch {
@@ -63,6 +63,7 @@ function Get-OptionalPropertyValue {
     if ($null -eq $property) {
         return $null
     }
+
     return $property.Value
 }
 
@@ -78,6 +79,7 @@ function Get-WindowsSystemProxy {
         if (-not [string]::IsNullOrWhiteSpace($autoConfigUrl)) {
             $source = '仅检测到 PAC，无法可靠转换为固定代理：' + $autoConfigUrl
         }
+
         return @{
             Found = $false
             Source = $source
@@ -110,8 +112,12 @@ function Get-WindowsSystemProxy {
     $httpsValue = $proxyMap['https']
     $socksValue = $proxyMap['socks']
 
-    if ([string]::IsNullOrWhiteSpace($httpValue)) { $httpValue = $httpsValue }
-    if ([string]::IsNullOrWhiteSpace($httpsValue)) { $httpsValue = $httpValue }
+    if ([string]::IsNullOrWhiteSpace($httpValue)) {
+        $httpValue = $httpsValue
+    }
+    if ([string]::IsNullOrWhiteSpace($httpsValue)) {
+        $httpsValue = $httpValue
+    }
 
     if ([string]::IsNullOrWhiteSpace($httpValue) -and [string]::IsNullOrWhiteSpace($socksValue)) {
         return @{
@@ -125,11 +131,11 @@ function Get-WindowsSystemProxy {
 
     $httpProxy = ConvertTo-ProxyUri -Value $httpValue
     $httpsProxy = ConvertTo-ProxyUri -Value $httpsValue
-    if ([string]::IsNullOrWhiteSpace($socksValue)) {
-        $allProxy = $httpsProxy
+    $allProxy = if ([string]::IsNullOrWhiteSpace($socksValue)) {
+        $httpsProxy
     }
     else {
-        $allProxy = ConvertTo-ProxyUri -Value $socksValue -DefaultScheme 'socks5'
+        ConvertTo-ProxyUri -Value $socksValue -DefaultScheme 'socks5'
     }
 
     return @{
@@ -192,7 +198,9 @@ function Get-CodexProcesses {
 
 function Get-CodexConnections {
     $processes = @(Get-CodexProcesses)
-    if ($processes.Count -eq 0) { return @() }
+    if ($processes.Count -eq 0) {
+        return @()
+    }
 
     $processIds = @($processes | Select-Object -ExpandProperty Id)
     return @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
@@ -207,11 +215,15 @@ function Test-IsExpectedConnection {
         [Uri]$Expected
     )
 
-    if ($RemotePort -ne $Expected.Port) { return $false }
+    if ($RemotePort -ne $Expected.Port) {
+        return $false
+    }
 
     $expectedHost = $Expected.Host.ToLowerInvariant()
     $actualHost = $RemoteAddress.ToLowerInvariant()
-    if ($expectedHost -eq $actualHost) { return $true }
+    if ($expectedHost -eq $actualHost) {
+        return $true
+    }
 
     $loopbackNames = @('localhost', '127.0.0.1', '::1', '0:0:0:0:0:0:0:1', '::ffff:127.0.0.1')
     return (($expectedHost -in $loopbackNames) -and ($actualHost -in $loopbackNames))
@@ -225,7 +237,13 @@ function ConvertTo-ReadyUrl {
         throw ('共享 app-server URL 必须是 ws:// 或 wss://：' + $WsUrl)
     }
 
-    if ($uri.Scheme -eq 'wss') { $scheme = 'https' } else { $scheme = 'http' }
+    if ($uri.Scheme -eq 'wss') {
+        $scheme = 'https'
+    }
+    else {
+        $scheme = 'http'
+    }
+
     $builder = New-Object -TypeName System.UriBuilder -ArgumentList @($scheme, $uri.Host, $uri.Port, '/readyz')
     return $builder.Uri.AbsoluteUri
 }
@@ -242,113 +260,6 @@ function Test-HttpReady {
     }
 }
 
-function Wait-HttpReady {
-    param(
-        [string]$Url,
-        [int]$Seconds = 30
-    )
-
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-HttpReady -Url $Url) { return $true }
-        Start-Sleep -Milliseconds 400
-    }
-    return $false
-}
-
-function Resolve-AoiRepoPath {
-    param([string]$ConfiguredPath)
-
-    $candidates = @()
-    $currentEnv = [string]$env:AOI_REPO_PATH
-    $userEnv = [string][Environment]::GetEnvironmentVariable('AOI_REPO_PATH', 'User')
-
-    foreach ($candidate in @($ConfiguredPath, $currentEnv, $userEnv)) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
-            $candidates += [string]$candidate
-        }
-    }
-
-    $parent = Split-Path -Parent $PSScriptRoot
-    if (-not [string]::IsNullOrWhiteSpace($parent)) {
-        $candidates += (Join-Path $parent 'codex2larkAOI')
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
-        foreach ($relative in @(
-            'codex2larkAOI',
-            'Documents\codex2larkAOI',
-            'Documents\GitHub\codex2larkAOI',
-            'GitHub\codex2larkAOI',
-            'source\repos\codex2larkAOI',
-            'Desktop\codex2larkAOI'
-        )) {
-            $candidates += (Join-Path $env:USERPROFILE $relative)
-        }
-    }
-
-    foreach ($candidate in @($candidates | Select-Object -Unique)) {
-        $stackScript = Join-Path $candidate 'scripts\shared-stack.ps1'
-        if (Test-Path -LiteralPath $stackScript) {
-            return (Resolve-Path -LiteralPath $candidate).Path
-        }
-    }
-
-    return $null
-}
-
-function Ensure-SharedApp {
-    param(
-        [string]$WsUrl,
-        [string]$ConfiguredRepoPath
-    )
-
-    $readyUrl = ConvertTo-ReadyUrl -WsUrl $WsUrl
-    $repoPath = Resolve-AoiRepoPath -ConfiguredPath $ConfiguredRepoPath
-
-    if (Test-HttpReady -Url $readyUrl) {
-        $env:CODEX_APP_SERVER_WS_URL = $WsUrl
-        [Environment]::SetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', $WsUrl, 'User')
-        if (-not [string]::IsNullOrWhiteSpace($repoPath)) {
-            $env:AOI_REPO_PATH = $repoPath
-            [Environment]::SetEnvironmentVariable('AOI_REPO_PATH', $repoPath, 'User')
-        }
-        Write-Host ('共享 app-server 已就绪：' + $WsUrl) -ForegroundColor Green
-        return
-    }
-
-    if ([string]::IsNullOrWhiteSpace($repoPath)) {
-        throw ('共享 app-server 未运行，且找不到 AOI 仓库。请先设置用户环境变量 AOI_REPO_PATH 指向 codex2larkAOI 本地目录。目标：' + $WsUrl)
-    }
-
-    $stackScript = Join-Path $repoPath 'scripts\shared-stack.ps1'
-    $runner = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if (-not (Test-Path -LiteralPath $runner)) {
-        $runner = (Get-Command powershell.exe -ErrorAction Stop).Source
-    }
-
-    Write-Section '启动 AOI shared app-server'
-    Write-Host ('AOI 仓库：' + $repoPath)
-    Write-Host ('目标：' + $WsUrl)
-
-    $env:AOI_REPO_PATH = $repoPath
-    [Environment]::SetEnvironmentVariable('AOI_REPO_PATH', $repoPath, 'User')
-
-    & $runner -NoProfile -ExecutionPolicy Bypass -File $stackScript -Action start -NoGui
-    $stackExitCode = $LASTEXITCODE
-    if ($stackExitCode -ne 0) {
-        throw ('AOI shared stack 启动失败，退出代码：' + $stackExitCode)
-    }
-
-    if (-not (Wait-HttpReady -Url $readyUrl -Seconds 35)) {
-        throw ('AOI shared stack 未在预期时间内就绪：' + $readyUrl)
-    }
-
-    $env:CODEX_APP_SERVER_WS_URL = $WsUrl
-    [Environment]::SetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', $WsUrl, 'User')
-    Write-Host ('共享 app-server 已启动：' + $WsUrl) -ForegroundColor Green
-}
-
 function Save-ConnectionReport {
     param(
         [string]$ReportPath,
@@ -359,6 +270,7 @@ function Save-ConnectionReport {
         [bool]$ProxyHit,
         [string]$SharedAppUrl,
         [string]$SharedAppStatus,
+        [string]$LaunchMode,
         [string]$SharedAppUserEnv,
         [bool]$SharedAppHit
     )
@@ -372,6 +284,7 @@ function Save-ConnectionReport {
         ('ALL_PROXY：' + (Hide-ProxyCredential $Proxy.All)),
         ('共享 App Server：' + $SharedAppUrl),
         ('共享 App Server 状态：' + $SharedAppStatus),
+        ('本次选择模式：' + $LaunchMode),
         ('CODEX_APP_SERVER_WS_URL(User)：' + $SharedAppUserEnv),
         ('发现 Codex/共享 App Server 连接：' + $(if ($SharedAppHit) { '是' } else { '否' })),
         ('包版本：' + [string]$PackageInfo.Package.Version),
@@ -389,11 +302,11 @@ function Save-ConnectionReport {
     }
     else {
         foreach ($connection in $Connections) {
-            try {
-                $processName = (Get-Process -Id $connection.OwningProcess -ErrorAction Stop).ProcessName
+            $processName = try {
+                (Get-Process -Id $connection.OwningProcess -ErrorAction Stop).ProcessName
             }
             catch {
-                $processName = '进程已退出'
+                '进程已退出'
             }
 
             $reportLines += ('PID={0} 进程={1} 本地={2}:{3} 对端={4}:{5}' -f
@@ -410,7 +323,9 @@ function Save-ConnectionReport {
         '',
         '判定说明：',
         '共享 App Server 状态“就绪”表示 45789/readyz 可访问。',
-        '“发现 Codex/共享 App Server 连接：是”表示至少有 Codex 相关进程连到共享 App Server 端口。',
+        '启动器只探测共享状态，不负责启动 AOI shared stack。',
+        '共享就绪时，本次 Desktop 启动环境会注入 CODEX_APP_SERVER_WS_URL。',
+        '共享未就绪时，本次 Desktop 启动环境会移除 CODEX_APP_SERVER_WS_URL，让 Desktop 使用内置 app-server。',
         '“发现 Clash 代理连接：是”表示至少有一个 Codex 相关进程连接到了预期的 Clash 代理端口。',
         '仅凭 TCP 表无法给单条加密连接标注“Remote Control WebSocket”。'
     )
@@ -439,8 +354,13 @@ try {
     Write-Host ('ALL  ：' + (Hide-ProxyCredential $proxy.All))
 
     $expectedProxyText = [string]$proxy.Https
-    if ([string]::IsNullOrWhiteSpace($expectedProxyText)) { $expectedProxyText = [string]$proxy.Http }
-    if ([string]::IsNullOrWhiteSpace($expectedProxyText)) { $expectedProxyText = [string]$proxy.All }
+    if ([string]::IsNullOrWhiteSpace($expectedProxyText)) {
+        $expectedProxyText = [string]$proxy.Http
+    }
+    if ([string]::IsNullOrWhiteSpace($expectedProxyText)) {
+        $expectedProxyText = [string]$proxy.All
+    }
+
     $expectedProxy = [Uri]$expectedProxyText
     if ($expectedProxy.Port -le 0) {
         throw ('代理地址没有有效端口：' + $expectedProxyText)
@@ -453,9 +373,38 @@ try {
     Write-Host ('EntryPoint ：' + [string]$packageInfo.Application.EntryPoint)
     Write-Host ('实际路径   ：' + $packageInfo.ExecutablePath)
 
-    $sharedReadyUrl = $null
+    $sharedReadyUrl = ConvertTo-ReadyUrl -WsUrl $SharedAppUrl
+    $sharedReady = $false
     if (-not $SkipSharedApp) {
-        $sharedReadyUrl = ConvertTo-ReadyUrl -WsUrl $SharedAppUrl
+        $sharedReady = Test-HttpReady -Url $sharedReadyUrl
+    }
+
+    if ($SkipSharedApp) {
+        $launchMode = '内置 app-server（强制）'
+        $sharedAppStatus = '跳过'
+    }
+    elseif ($sharedReady) {
+        $launchMode = '共享 app-server'
+        $sharedAppStatus = '就绪'
+    }
+    else {
+        $launchMode = '内置 app-server'
+        $sharedAppStatus = '未就绪'
+    }
+
+    Write-Section '选择 App Server 模式'
+    if ($sharedReady -and -not $SkipSharedApp) {
+        Write-Host ('共享 App Server 已就绪：' + $SharedAppUrl) -ForegroundColor Green
+        Write-Host '本次 Desktop 将连接共享 App Server。' -ForegroundColor Green
+    }
+    else {
+        if ($SkipSharedApp) {
+            Write-Warning '已使用 -SkipSharedApp，本次强制使用 Desktop 内置 app-server。'
+        }
+        else {
+            Write-Host ('共享 App Server 未运行：' + $SharedAppUrl) -ForegroundColor Yellow
+            Write-Host '本次 Desktop 使用内置 app-server；启动器不会启动 AOI shared stack。' -ForegroundColor Yellow
+        }
     }
 
     if (-not $CheckOnly) {
@@ -474,34 +423,34 @@ try {
         }
         Write-Host '代理端口可连接。' -ForegroundColor Green
 
-        if (-not $SkipSharedApp) {
-            Ensure-SharedApp -WsUrl $SharedAppUrl -ConfiguredRepoPath $AoiRepoPath
-        }
-        else {
-            Write-Warning '已使用 -SkipSharedApp：本次启动不会强制连接 AOI shared app-server。'
-        }
-
         Write-Section '设置本次启动环境'
         $env:HTTP_PROXY = $proxy.Http
         $env:HTTPS_PROXY = $proxy.Https
         $env:ALL_PROXY = $proxy.All
         $env:NO_PROXY = 'localhost,127.0.0.1,::1'
-        if (-not $SkipSharedApp) {
+
+        if ($sharedReady -and -not $SkipSharedApp) {
             $env:CODEX_APP_SERVER_WS_URL = $SharedAppUrl
+        }
+        else {
+            Remove-Item Env:CODEX_APP_SERVER_WS_URL -ErrorAction SilentlyContinue
         }
 
         Write-Host ('HTTP_PROXY =' + (Hide-ProxyCredential $env:HTTP_PROXY))
         Write-Host ('HTTPS_PROXY=' + (Hide-ProxyCredential $env:HTTPS_PROXY))
         Write-Host ('ALL_PROXY  =' + (Hide-ProxyCredential $env:ALL_PROXY))
         Write-Host ('NO_PROXY   =' + $env:NO_PROXY)
-        if (-not $SkipSharedApp) {
+        if ($sharedReady -and -not $SkipSharedApp) {
             Write-Host ('CODEX_APP_SERVER_WS_URL=' + $env:CODEX_APP_SERVER_WS_URL)
+        }
+        else {
+            Write-Host 'CODEX_APP_SERVER_WS_URL=<未设置，本次使用内置 app-server>'
         }
 
         Write-Section '启动 Codex'
         $launchProcess = Start-Process -FilePath $packageInfo.ExecutablePath -PassThru
         Write-Host ('已提交启动，初始 PID：' + $launchProcess.Id) -ForegroundColor Green
-        Write-Host ('等待 ' + $WaitSeconds + ' 秒，让界面、shared app-server 和网络连接完成初始化……')
+        Write-Host ('等待 ' + $WaitSeconds + ' 秒，让界面和网络连接完成初始化……')
         Start-Sleep -Seconds $WaitSeconds
     }
 
@@ -512,20 +461,16 @@ try {
     })
     $proxyHit = ($proxyConnections.Count -gt 0)
 
-    $sharedAppStatus = '跳过'
     $sharedAppHit = $false
-    if (-not $SkipSharedApp) {
-        if (Test-HttpReady -Url $sharedReadyUrl) { $sharedAppStatus = '就绪' } else { $sharedAppStatus = '未就绪' }
-        $sharedUri = [Uri]$SharedAppUrl
-        $sharedConnections = @($connections | Where-Object {
-            Test-IsExpectedConnection -RemoteAddress $_.RemoteAddress -RemotePort $_.RemotePort -Expected $sharedUri
-        })
-        $sharedAppHit = ($sharedConnections.Count -gt 0)
-    }
+    $sharedUri = [Uri]$SharedAppUrl
+    $sharedConnections = @($connections | Where-Object {
+        Test-IsExpectedConnection -RemoteAddress $_.RemoteAddress -RemotePort $_.RemotePort -Expected $sharedUri
+    })
+    $sharedAppHit = ($sharedConnections.Count -gt 0)
 
     $sharedAppUserEnv = [string][Environment]::GetEnvironmentVariable('CODEX_APP_SERVER_WS_URL', 'User')
     $reportPath = Join-Path $PSScriptRoot 'Codex-代理连接报告.txt'
-    Save-ConnectionReport -ReportPath $reportPath -Proxy $proxy -PackageInfo $packageInfo -Connections $connections -ExpectedProxy $expectedProxy -ProxyHit $proxyHit -SharedAppUrl $SharedAppUrl -SharedAppStatus $sharedAppStatus -SharedAppUserEnv $sharedAppUserEnv -SharedAppHit $sharedAppHit
+    Save-ConnectionReport -ReportPath $reportPath -Proxy $proxy -PackageInfo $packageInfo -Connections $connections -ExpectedProxy $expectedProxy -ProxyHit $proxyHit -SharedAppUrl $SharedAppUrl -SharedAppStatus $sharedAppStatus -LaunchMode $launchMode -SharedAppUserEnv $sharedAppUserEnv -SharedAppHit $sharedAppHit
 
     if ($proxyHit) {
         Write-Host ('已确认：发现 ' + $proxyConnections.Count + ' 条 Codex 到 Clash 代理端口的连接。') -ForegroundColor Green
@@ -534,22 +479,14 @@ try {
         Write-Warning '暂未发现 Codex 到预期 Clash 代理端口的连接。若 Remote Control 尚未建立，请启用后使用 -CheckOnly 再检查。'
     }
 
-    if (-not $SkipSharedApp) {
-        if ($sharedAppStatus -eq '就绪') {
-            Write-Host ('共享 App Server：' + $SharedAppUrl + ' 已就绪。') -ForegroundColor Green
-        }
-        else {
-            Write-Warning ('共享 App Server 未就绪：' + $SharedAppUrl)
-        }
-
-        if ($sharedAppHit) {
-            Write-Host '已发现 Codex 进程连接到共享 App Server。' -ForegroundColor Green
-        }
-        elseif (-not $CheckOnly) {
-            Write-Warning '暂未在 TCP 表中看到 Codex -> shared app-server 连接；请在 Desktop 完成初始化后用 -CheckOnly 复查。'
-        }
+    if ($sharedAppHit) {
+        Write-Host '已发现 Codex 进程连接到共享 App Server。' -ForegroundColor Green
+    }
+    elseif ($sharedReady -and -not $SkipSharedApp -and -not $CheckOnly) {
+        Write-Warning '共享 App Server 已就绪，但暂未在 TCP 表中看到 Desktop 连接；请在 Desktop 完成初始化后用 -CheckOnly 复查。'
     }
 
+    Write-Host ('本次选择模式：' + $launchMode)
     Write-Host ('报告：' + $reportPath)
     Write-Host ''
     Write-Host '复查命令：' -ForegroundColor Cyan
