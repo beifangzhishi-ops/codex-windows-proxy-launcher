@@ -4,6 +4,10 @@ setlocal
 set "shouldPause=1"
 if /I "%~1"=="--no-pause" set "shouldPause=0"
 
+rem Standalone/no-shared mode: prevent a persisted AOI shared App Server URL
+rem from leaking into this Desktop process tree. User-level environment is untouched.
+set "CODEX_APP_SERVER_WS_URL="
+
 set "shellPath="
 set "shellKind="
 where pwsh.exe >nul 2>&1
