@@ -15,7 +15,7 @@
 1. 确认 Microsoft Store 版 Codex 已安装。
 2. 确认 Clash 已启动，并开启 Windows 系统代理。
 3. 在 Codex 中保存当前工作，然后从菜单完全退出 Codex。
-4. 等待几秒，确保属于 OpenAI.Codex 安装目录的相关进程已经结束。
+4. 不需要手动结束残留的沙箱或辅助进程；启动器只会阻止已确认仍在运行的桌面主实例。
 5. 双击 Start-Codex-Proxy.cmd。
 
 脚本会依次：

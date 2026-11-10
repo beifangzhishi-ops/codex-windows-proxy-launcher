@@ -6,3 +6,5 @@
 !Start-Codex-Proxy.ps1
 !Start-Codex-Proxy.cmd
 !Codex-代理使用说明.md
+!tests/
+!tests/ProcessDetection.Tests.ps1

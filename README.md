@@ -61,3 +61,11 @@ CMD 入口保持 ASCII 文本，并在启动 PowerShell 前切换到 UTF-8 代�
     pwsh -NoProfile -ExecutionPolicy Bypass -File .\Start-Codex-Proxy.ps1 -CheckOnly
 
 TCP 连接命中代理端口只能证明相关连接经过该代理，不能单独证明某条连接就是 Remote Control WebSocket。
+
+## 重新启动时的进程判断
+
+启动器只在确认当前 Store 包的桌面主实例仍在运行时阻止重复启动。它根据 Manifest 指定的主程序路径、可见主窗口以及进程命令行区分主实例与 Electron 辅助进程；不把残留的沙箱或后台进程等同于正在运行的主窗口。
+
+如果只发现辅助进程，启动器会提示并继续启动，不会自动结束进程。若 Windows 不允许读取进程命令行，则仅以可见主窗口作为阻止依据；无法确认身份的无窗口进程只触发警告。代理变量仍然只注入本次新建的进程树，因此真正仍在后台运行的旧实例可能需要从应用菜单退出后才能获得新代理设置。
+
+维护时可以运行 `tests/ProcessDetection.Tests.ps1`（PowerShell 7 和 Windows PowerShell 5.1），验证主窗口、Electron 辅助进程、其他包内程序以及无法读取命令行等场景。

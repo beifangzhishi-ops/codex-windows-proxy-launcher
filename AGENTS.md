@@ -12,7 +12,8 @@
 - Invoke-CommandInDesktopPackage does not inherit arbitrary caller environment variables. Use it to create a package-context Windows PowerShell process, set proxy variables inside that context, and launch the Manifest executable from there with PreventBreakaway.
 - Preserve proxy variables only in the current launcher/package process tree. Do not write permanent user or machine proxy environment variables.
 - Clear CODEX_APP_SERVER_WS_URL for the standalone launch process tree.
-- Detect existing Codex processes by executable path under the selected OpenAI.Codex install location, not by the ChatGPT.exe process name alone.
+- Identify Codex package processes by executable path, but block a new launch only for the manifest executable acting as a desktop main instance (visible main window or command line without an Electron --type role).
+- Auxiliary processes and indeterminate windowless processes must not block launch. If command-line inspection is unavailable, warn and rely on visible windows. Never terminate residual processes automatically.
 
 ## Maintenance
 
@@ -20,5 +21,6 @@
 - Remove obsolete behavior and stale terminology when changing the project; do not leave defensive references to removed flows.
 - Keep Start-Codex-Proxy.cmd ASCII-compatible and force CRLF through .gitattributes so GitHub direct-download and Windows checkout behavior stays consistent.
 - Validate both PowerShell 7 entry and Windows PowerShell 5.1 fallback behavior.
+- Run tests/ProcessDetection.Tests.ps1 under both PowerShell 7 and Windows PowerShell 5.1 when changing process detection.
 - Before release, verify the direct-download scenario on a clean directory and confirm there is no fallback to a bare WindowsApps executable.
 - After successful changes, inspect Git status and diff, commit, and push the remote branch.

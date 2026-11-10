@@ -241,6 +241,68 @@ function Get-CodexProcesses {
         })
 }
 
+function Get-CodexLaunchProcessRole {
+    param(
+        [object]$Process,
+        [hashtable]$PackageInfo,
+        [AllowNull()][string]$CommandLine
+    )
+
+    # The package can leave behind worker processes after its desktop window exits.
+    # Only the executable declared by the manifest can be the desktop main process.
+    if (-not [string]::Equals([string]$Process.Path, $PackageInfo.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+        return 'Background'
+    }
+    if ($Process.MainWindowHandle -ne 0) {
+        return 'Main'
+    }
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return 'Unknown'
+    }
+    if ($CommandLine -match '(?i)(?:^|\s)--type(?:=|\s)') {
+        return 'Background'
+    }
+    return 'Main'
+}
+
+function Get-CodexLaunchProcessStates {
+    param([hashtable]$PackageInfo)
+
+    $processes = @(Get-CodexProcesses -PackageInfo $PackageInfo)
+    if ($processes.Count -eq 0) {
+        return @()
+    }
+
+    $manifestProcesses = @($processes | Where-Object {
+        [string]::Equals([string]$_.Path, $PackageInfo.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $commandLines = @{}
+    if ($manifestProcesses.Count -gt 0) {
+        $filter = (@($manifestProcesses | ForEach-Object { 'ProcessId = ' + $_.Id }) -join ' OR ')
+        try {
+            $details = @(Get-CimInstance -ClassName Win32_Process -Filter $filter -OperationTimeoutSec 5 -ErrorAction Stop)
+            foreach ($detail in $details) {
+                $commandLines[[int]$detail.ProcessId] = [string]$detail.CommandLine
+            }
+        }
+        catch {
+            Write-Warning '无法读取 Codex 进程命令行；仅凭可见主窗口判断是否已有主实例。'
+        }
+    }
+
+    foreach ($process in $processes) {
+        $commandLine = $null
+        if ($commandLines.ContainsKey([int]$process.Id)) {
+            $commandLine = $commandLines[[int]$process.Id]
+        }
+        [pscustomobject]@{
+            Id = $process.Id
+            Name = $process.ProcessName
+            Role = Get-CodexLaunchProcessRole -Process $process -PackageInfo $PackageInfo -CommandLine $commandLine
+        }
+    }
+}
+
 function Get-CodexConnections {
     param([hashtable]$PackageInfo)
 
@@ -479,12 +541,20 @@ try {
     Write-Host ('实际路径  ：' + $packageInfo.ExecutablePath)
 
     if (-not $CheckOnly) {
-        $runningCodex = @(Get-CodexProcesses -PackageInfo $packageInfo)
+        $processStates = @(Get-CodexLaunchProcessStates -PackageInfo $packageInfo)
+        $runningCodex = @($processStates | Where-Object { $_.Role -eq 'Main' })
         if ($runningCodex.Count -gt 0) {
             Write-Section '检测到已有 Codex 实例'
-            Write-Warning '请先从 Codex 菜单完全退出应用，并等待其 OpenAI.Codex 包内进程全部结束，然后重新双击启动脚本。'
+            Write-Host ('主实例 PID：' + (($runningCodex | ForEach-Object { $_.Id }) -join ', '))
+            Write-Warning '请先从 Codex 菜单退出正在运行的主实例，然后重新双击启动脚本。'
             Write-Warning '脚本不会自动结束现有 Codex 进程，以免中断未保存工作。'
             exit 20
+        }
+        if ($processStates.Count -gt 0) {
+            Write-Warning ('检测到 ' + $processStates.Count + ' 个 Codex 包相关进程，但未确认有正在运行的主实例；继续启动，不会结束这些进程。')
+            if (@($processStates | Where-Object { $_.Role -eq 'Unknown' }).Count -gt 0) {
+                Write-Warning '部分进程身份无法确认。如果旧实例仍在后台运行，可能需要从应用菜单将其退出才能重新注入代理。'
+            }
         }
 
         Write-Section '检查 Clash 代理端口'
